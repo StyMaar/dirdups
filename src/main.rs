@@ -6,7 +6,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, prelude::*};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use walkdir::WalkDir;
 
@@ -42,25 +42,25 @@ struct Cli {
     )]
     head: String,
 
-    #[structopt(long, required = true, index = 1, help = "Directories to search")]
-    directories: Vec<String>,
+    #[structopt(long, required = true, index = 1, help = "Directory to search")]
+    directories: Vec<PathBuf>,
 }
 
 struct Duplicate {
-    dir1: String,
-    dir2: String,
+    dir1: PathBuf,
+    dir2: PathBuf,
     dir1_files_number: usize,
     dir2_files_number: usize,
     intersection: usize,
 }
 
-fn get_hash(filename: String, filesize: usize, read_first_bytes: usize) -> io::Result<u64> {
-    let crc32 = get_crc32_checksum(filename, read_first_bytes)?;
+fn get_hash(path: impl AsRef<Path>, filesize: usize, read_first_bytes: usize) -> io::Result<u64> {
+    let crc32 = get_crc32_checksum(path, read_first_bytes)?;
     Ok(crc32 as u64 + filesize as u64)
 }
 
-fn get_crc32_checksum(filename: String, read_first_bytes: usize) -> io::Result<u32> {
-    let mut f = File::open(filename)?;
+fn get_crc32_checksum(path: impl AsRef<Path>, read_first_bytes: usize) -> io::Result<u32> {
+    let mut f = File::open(path)?;
     let mut hasher = Hasher::new();
     const BUF_SIZE: usize = 1024;
     let mut buffer: [u8; BUF_SIZE] = [0; BUF_SIZE];
@@ -80,12 +80,12 @@ fn get_crc32_checksum(filename: String, read_first_bytes: usize) -> io::Result<u
     Ok(hasher.finalize())
 }
 
-fn get_file_size(path: &String) -> io::Result<usize> {
+fn get_file_size(path: impl AsRef<Path>) -> io::Result<usize> {
     Ok(File::open(path)?.metadata()?.len() as usize)
 }
 
-fn get_files(directories: Vec<String>) -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
+fn get_files(directories: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
 
     for directory in directories.iter() {
         for entry in WalkDir::new(directory)
@@ -93,7 +93,7 @@ fn get_files(directories: Vec<String>) -> Vec<String> {
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
         {
-            let path = String::from(entry.path().to_string_lossy());
+            let path = entry.path().to_owned();
             files.push(path);
         }
     }
@@ -101,11 +101,11 @@ fn get_files(directories: Vec<String>) -> Vec<String> {
 }
 
 fn load_files_info(
-    files: &Vec<String>,
+    files: &Vec<PathBuf>,
     min_size: usize,
     head: usize,
-    hash_dirs: &mut HashMap<u64, HashSet<String>>,
-    dir_hashes: &mut HashMap<String, HashSet<u64>>,
+    hash_dirs: &mut HashMap<u64, HashSet<PathBuf>>,
+    dir_hashes: &mut HashMap<PathBuf, HashSet<u64>>,
 ) {
     let files_cnt = files.len();
     println!("Found: {} files", files_cnt);
@@ -119,7 +119,7 @@ fn load_files_info(
         let filesize = match get_file_size(file) {
             Ok(filesize) => filesize,
             Err(e) => {
-                eprintln!("Error: {}: {}", file, e);
+                eprintln!("Error: {:?}: {}", file, e);
                 continue;
             }
         };
@@ -127,14 +127,14 @@ fn load_files_info(
             continue;
         }
 
-        let dir: String = match Path::new(file).parent() {
-            Some(path) => String::from(path.to_string_lossy()),
-            None => String::from(""),
+        let dir = match file.parent() {
+            Some(path) => path.to_owned(),
+            None => PathBuf::from(""),
         };
-        let hash = match get_hash(file.clone(), filesize, head) {
+        let hash = match get_hash(&file, filesize, head) {
             Ok(hash) => hash,
             Err(e) => {
-                eprintln!("Error: {}: {}", file, e);
+                eprintln!("Error: {:?}: {}", file, e);
                 continue;
             }
         };
@@ -161,15 +161,15 @@ fn load_files_info(
 }
 
 fn find_duplicates(
-    hash_dirs: &HashMap<u64, HashSet<String>>,
-    dir_hashes: &HashMap<String, HashSet<u64>>,
+    hash_dirs: &HashMap<u64, HashSet<PathBuf>>,
+    dir_hashes: &HashMap<PathBuf, HashSet<u64>>,
 ) -> Vec<Duplicate> {
     let mut duplicates = Vec::new();
     let mut added = HashSet::new();
 
     for (_, dirs) in hash_dirs.iter() {
         let mut dirs_iter = dirs.iter();
-        let mut prev_dir: &String = match dirs_iter.next() {
+        let mut prev_dir = match dirs_iter.next() {
             Some(v) => v,
             None => break,
         };
@@ -187,8 +187,8 @@ fn find_duplicates(
             let prev_files = dir_hashes.get(prev_dir).unwrap();
             let intersection: HashSet<_> = files.intersection(&prev_files).collect();
             let duplicate = Duplicate {
-                dir1: String::from(dir),
-                dir2: String::from(prev_dir),
+                dir1: dir.to_owned(),
+                dir2: prev_dir.to_owned(),
                 dir1_files_number: files.len(),
                 dir2_files_number: prev_files.len(),
                 intersection: intersection.len(),
@@ -206,9 +206,9 @@ fn print_duplicates(duplicates: &Vec<Duplicate>) {
     for duplicate in duplicates.iter() {
         println!(
             "{}: {} - {}: {} | {}",
-            duplicate.dir1,
+            duplicate.dir1.to_string_lossy(),
             duplicate.dir1_files_number,
-            duplicate.dir2,
+            duplicate.dir2.to_string_lossy(),
             duplicate.dir2_files_number,
             duplicate.intersection
         )
@@ -240,8 +240,8 @@ fn main() {
         );
     }
 
-    let mut hash_dirs: HashMap<u64, HashSet<String>> = HashMap::new();
-    let mut dir_hashes: HashMap<String, HashSet<u64>> = HashMap::new();
+    let mut hash_dirs: HashMap<u64, HashSet<PathBuf>> = HashMap::new();
+    let mut dir_hashes: HashMap<PathBuf, HashSet<u64>> = HashMap::new();
 
     let files = get_files(args.directories);
     load_files_info(&files, min_size, head, &mut hash_dirs, &mut dir_hashes);
