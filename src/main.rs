@@ -44,7 +44,7 @@ struct Cli {
     head: String,
 
     #[structopt(long, required = true, index = 1, help = "Directory to search")]
-    directories: PathBuf,
+    directories: Vec<PathBuf>,
 }
 
 struct Duplicate {
@@ -81,9 +81,13 @@ fn get_crc32_checksum(path: impl AsRef<Path>, read_first_bytes: usize) -> io::Re
     Ok(hasher.finalize())
 }
 
-fn get_files(dir_path: impl AsRef<Path>) -> impl Iterator<Item= DirEntry> {
+fn get_files(mut path_list: Vec<PathBuf>) -> impl Iterator<Item= DirEntry> {
     
-    let iter = walk_dir(dir_path).chain(iter::empty());
+    let mut iter = Box::new(iter::empty()) as Box<dyn Iterator<Item= DirEntry>>;
+
+    for path in path_list {
+        iter = Box::new(iter.chain(walk_dir(path).chain(iter::empty())))
+    }
 
     iter
 }
