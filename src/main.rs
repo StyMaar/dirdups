@@ -1,11 +1,12 @@
 use crc32fast::Hasher;
 use humanize_rs::bytes::Bytes;
-use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
+use walkdir::DirEntry;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, prelude::*};
+use std::iter;
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use walkdir::WalkDir;
@@ -43,7 +44,7 @@ struct Cli {
     head: String,
 
     #[structopt(long, required = true, index = 1, help = "Directory to search")]
-    directories: Vec<PathBuf>,
+    directories: PathBuf,
 }
 
 struct Duplicate {
@@ -80,64 +81,41 @@ fn get_crc32_checksum(path: impl AsRef<Path>, read_first_bytes: usize) -> io::Re
     Ok(hasher.finalize())
 }
 
-fn get_file_size(path: impl AsRef<Path>) -> io::Result<usize> {
-    Ok(File::open(path)?.metadata()?.len() as usize)
+fn get_files(dir_path: impl AsRef<Path>) -> impl Iterator<Item= DirEntry> {
+    
+    let iter = walk_dir(dir_path).chain(iter::empty());
+
+    iter
 }
 
-fn get_files(directories: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = Vec::new();
-
-    for directory in directories.iter() {
-        for entry in WalkDir::new(directory)
+fn walk_dir(path: impl AsRef<Path>)-> impl Iterator<Item= DirEntry>{
+    WalkDir::new(path)
             .into_iter()
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path().to_owned();
-            files.push(path);
-        }
-    }
-    files
 }
 
 fn load_files_info(
-    files: &Vec<PathBuf>,
+    files: impl Iterator<Item=DirEntry>,
     min_size: usize,
     head: usize,
     hash_dirs: &mut HashMap<u64, HashSet<PathBuf>>,
     dir_hashes: &mut HashMap<PathBuf, HashSet<u64>>,
 ) {
-    let files_cnt = files.len();
-    println!("Found: {} files", files_cnt);
 
-    let progress_bar = ProgressBar::new(files_cnt as u64);
-    progress_bar.set_style(
-        ProgressStyle::default_bar().template("[{elapsed_precise}] {bar:80} {pos}/{len}"),
-    );
-
-    for file in files.iter() {
-        let filesize = match get_file_size(file) {
-            Ok(filesize) => filesize,
-            Err(e) => {
-                eprintln!("Error: {:?}: {}", file, e);
-                continue;
-            }
-        };
+    let pb = indicatif::ProgressBar::new_spinner();
+        
+    pb.set_style(ProgressStyle::default_spinner().template("{spinner:.green} [{elapsed_precise}]"));
+    for file in files {
+        pb.inc(1);
+        let filesize = file.metadata().unwrap().len() as usize;
         if filesize < min_size {
             continue;
         }
 
-        let dir = match file.parent() {
-            Some(path) => path.to_owned(),
-            None => PathBuf::from(""),
-        };
-        let hash = match get_hash(&file, filesize, head) {
-            Ok(hash) => hash,
-            Err(e) => {
-                eprintln!("Error: {:?}: {}", file, e);
-                continue;
-            }
-        };
+        let dir = file.path().parent().unwrap().to_owned();
+        
+        let hash = get_hash(file.path(), filesize, head).unwrap();
 
         if let Some(val) = hash_dirs.get_mut(&hash) {
             val.insert(dir.clone());
@@ -154,10 +132,7 @@ fn load_files_info(
             hashes.insert(hash.clone());
             dir_hashes.insert(dir, hashes);
         }
-
-        progress_bar.inc(1);
     }
-    progress_bar.finish();
 }
 
 fn find_duplicates(
@@ -244,7 +219,7 @@ fn main() {
     let mut dir_hashes: HashMap<PathBuf, HashSet<u64>> = HashMap::new();
 
     let files = get_files(args.directories);
-    load_files_info(&files, min_size, head, &mut hash_dirs, &mut dir_hashes);
+    load_files_info(files, min_size, head, &mut hash_dirs, &mut dir_hashes);
 
     let mut duplicates: Vec<Duplicate> = find_duplicates(&hash_dirs, &dir_hashes)
         .into_iter()
